@@ -1,0 +1,149 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: djs-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-djs_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-djs_password}
+      POSTGRES_DB: ${POSTGRES_DB:-djs_db}
+    ports:
+      - "5432:5432"
+    volumes:
+      - djs_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-djs_user} -d ${POSTGRES_DB:-djs_db}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  migration:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: djs-migration
+    command: alembic upgrade head
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-djs_user}:${POSTGRES_PASSWORD:-djs_password}@postgres:5432/${POSTGRES_DB:-djs_db}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: djs-api
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-djs_user}:${POSTGRES_PASSWORD:-djs_password}@postgres:5432/${POSTGRES_DB:-djs_db}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-change-me-in-production}
+      JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
+      ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-30}
+      JOB_LEASE_DURATION_SECONDS: ${JOB_LEASE_DURATION_SECONDS:-30}
+      JOB_LEASE_RENEW_INTERVAL_SECONDS: ${JOB_LEASE_RENEW_INTERVAL_SECONDS:-10}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migration:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  worker-1:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: djs-worker-1
+    command: python run_worker.py
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-djs_user}:${POSTGRES_PASSWORD:-djs_password}@postgres:5432/${POSTGRES_DB:-djs_db}
+      WORKER_NAME: worker-1
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-5}
+      WORKER_POLL_INTERVAL_MS: ${WORKER_POLL_INTERVAL_MS:-500}
+      WORKER_HEARTBEAT_INTERVAL_SECONDS: ${WORKER_HEARTBEAT_INTERVAL_SECONDS:-10}
+      JOB_LEASE_DURATION_SECONDS: ${JOB_LEASE_DURATION_SECONDS:-30}
+      JOB_LEASE_RENEW_INTERVAL_SECONDS: ${JOB_LEASE_RENEW_INTERVAL_SECONDS:-10}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migration:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  worker-2:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: djs-worker-2
+    command: python run_worker.py
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-djs_user}:${POSTGRES_PASSWORD:-djs_password}@postgres:5432/${POSTGRES_DB:-djs_db}
+      WORKER_NAME: worker-2
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-5}
+      WORKER_POLL_INTERVAL_MS: ${WORKER_POLL_INTERVAL_MS:-500}
+      WORKER_HEARTBEAT_INTERVAL_SECONDS: ${WORKER_HEARTBEAT_INTERVAL_SECONDS:-10}
+      JOB_LEASE_DURATION_SECONDS: ${JOB_LEASE_DURATION_SECONDS:-30}
+      JOB_LEASE_RENEW_INTERVAL_SECONDS: ${JOB_LEASE_RENEW_INTERVAL_SECONDS:-10}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migration:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  scheduler:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: djs-scheduler
+    command: python run_scheduler.py
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-djs_user}:${POSTGRES_PASSWORD:-djs_password}@postgres:5432/${POSTGRES_DB:-djs_db}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migration:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  reaper:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: djs-reaper
+    command: python run_reaper.py
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-djs_user}:${POSTGRES_PASSWORD:-djs_password}@postgres:5432/${POSTGRES_DB:-djs_db}
+      WORKER_STALE_THRESHOLD_SECONDS: ${WORKER_STALE_THRESHOLD_SECONDS:-30}
+      REAPER_INTERVAL_SECONDS: ${REAPER_INTERVAL_SECONDS:-15}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migration:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: djs-frontend
+    ports:
+      - "8080:80"
+    depends_on:
+      - api
+    restart: unless-stopped
+
+volumes:
+  djs_pgdata:
