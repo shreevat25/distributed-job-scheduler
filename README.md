@@ -40,6 +40,4 @@ Access the dashboard at `http://localhost:8080`.
 - [Database Design](docs/DATABASE_DESIGN.md)
 - [Design Decisions](docs/DESIGN_DECISIONS.md)
 
-## Limitations & Disclaimers
-- **Execution Semantics**: This system provides **at-least-once** delivery guarantees. While locking mechanisms aggressively prevent double-processing, hard worker crashes during job execution will result in the job being recovered and retried. It does NOT claim exactly-once execution.
-- **Docker**: The Docker/Docker Compose configuration provided in this repository was not verified in the current local development environment due to missing dependencies.
+
