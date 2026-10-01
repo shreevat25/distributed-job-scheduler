@@ -12,12 +12,12 @@ from app.models.queue import Queue
 from app.models.user import User
 from app.models.worker import Worker
 from app.services import claim_service
-from app.worker import lifecycle
+from app.services import execution_service
 
 
 @pytest.mark.asyncio
 class TestJobLifecycle:
-    """Verify complete queued -> claimed -> running -> completed lifecycle."""
+    """Verify complete queued -> claimed -> running -> completed execution_service."""
 
     async def test_complete_job_lifecycle(self, independent_session_factory):
         """Test full happy path execution lifecycle with attempt tracking."""
@@ -63,7 +63,7 @@ class TestJobLifecycle:
 
         # 2. Start execution
         async with (await independent_session_factory()) as session:
-            job, execution = await lifecycle.start_execution(session, job_id, worker_id, claim_token)
+            job, execution = await execution_service.start_execution(session, job_id, worker_id, claim_token)
             await session.refresh(job)
             await session.refresh(execution)
             assert job.status == JobStatus.RUNNING
@@ -76,7 +76,7 @@ class TestJobLifecycle:
         # 3. Complete job
         async with (await independent_session_factory()) as session:
             result = {"echoed": {"data": "hello"}}
-            job = await lifecycle.complete_job(session, job_id, worker_id, claim_token, result)
+            job = await execution_service.complete_job(session, job_id, worker_id, claim_token, result)
             await session.refresh(job)
             assert job.status == JobStatus.COMPLETED
             assert job.completed_at is not None
@@ -115,10 +115,10 @@ class TestJobLifecycle:
             claimed = await claim_service.claim_jobs(session, queue.id, worker.id, 1, 30)
             await session.commit()
             job = claimed[0]
-            await lifecycle.start_execution(session, job.id, worker.id, job.claim_token)
+            await execution_service.start_execution(session, job.id, worker.id, job.claim_token)
             await session.commit()
 
             # Attempt complete with wrong token
             wrong_token = uuid.uuid4()
             with pytest.raises(OwnershipLostError):
-                await lifecycle.complete_job(session, job.id, worker.id, wrong_token, {"res": "ok"})
+                await execution_service.complete_job(session, job.id, worker.id, wrong_token, {"res": "ok"})

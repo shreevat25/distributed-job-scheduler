@@ -1,4 +1,4 @@
-"""Claim service — business orchestration for atomic job claiming.
+"""Claim service — atomic job claiming and lease renewal.
 
 DESIGN TRADEOFF DOCUMENTED:
 
@@ -118,3 +118,25 @@ async def claim_jobs(
     )
 
     return claimed
+
+
+async def renew_lease(
+    session: AsyncSession,
+    job_id: uuid.UUID,
+    worker_id: uuid.UUID,
+    claim_token: uuid.UUID,
+    lease_duration_seconds: int,
+) -> bool:
+    """Renew the lease on a claimed or running job and commit.
+
+    Returns True if lease renewed successfully, False if ownership was lost.
+    """
+    renewed = await job_repository.renew_lease(
+        session,
+        job_id=job_id,
+        worker_id=worker_id,
+        claim_token=claim_token,
+        lease_duration_seconds=lease_duration_seconds,
+    )
+    await session.commit()
+    return renewed

@@ -10,7 +10,6 @@ from app.models.queue import Queue
 from app.models.user import User
 from app.models.worker import Worker
 from app.services import claim_service
-from app.worker import lifecycle
 
 
 @pytest.mark.asyncio
@@ -47,7 +46,7 @@ class TestLeaseRenewal:
 
         # Renew with valid token -> returns True, increments lease_version
         async with (await independent_session_factory()) as session:
-            renewed = await lifecycle.renew_lease(session, job_id, worker_id, claim_token, 60)
+            renewed = await claim_service.renew_lease(session, job_id, worker_id, claim_token, 60)
             assert renewed is True
             stmt = select(Job).where(Job.id == job_id)
             updated_job = (await session.execute(stmt)).scalar_one()
@@ -56,5 +55,5 @@ class TestLeaseRenewal:
         # Renew with wrong token -> returns False (ownership lost)
         async with (await independent_session_factory()) as session:
             wrong_token = uuid.uuid4()
-            renewed = await lifecycle.renew_lease(session, job_id, worker_id, wrong_token, 60)
+            renewed = await claim_service.renew_lease(session, job_id, worker_id, wrong_token, 60)
             assert renewed is False

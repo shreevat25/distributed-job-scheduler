@@ -12,13 +12,13 @@ from app.core.exceptions import IdempotencyConflictError
 from app.models.job import Job
 from app.models.job_batch import JobBatch
 from app.models.queue import Queue
-from app.repositories import job_repository
+from app.repositories import batch_repository, job_repository
 from app.schemas.batch import (
     BatchCreate,
     BatchResponse,
     BatchDetailResponse,
-    BatchStatusCount,
 )
+from app.services import metrics_service
 
 
 async def create_batch(
@@ -37,14 +37,15 @@ async def create_batch(
 
     try:
         # Create the batch record
-        batch = JobBatch(
-            queue_id=queue.id,
-            created_by=user_id,
-            name=data.name,
-            total_jobs=len(data.jobs),
+        batch = await batch_repository.create(
+            session,
+            JobBatch(
+                queue_id=queue.id,
+                created_by=user_id,
+                name=data.name,
+                total_jobs=len(data.jobs),
+            ),
         )
-        session.add(batch)
-        await session.flush()  # Get batch.id
 
         job_ids: list[uuid.UUID] = []
 
@@ -76,8 +77,7 @@ async def create_batch(
                 idempotency_key=item.idempotency_key,
                 max_attempts=max_attempts,
             )
-            session.add(job)
-            await session.flush()
+            await job_repository.create_job(session, job)
             job_ids.append(job.id)
     except IntegrityError:
         await session.rollback()
@@ -98,21 +98,11 @@ async def get_batch_detail(
     batch_id: uuid.UUID,
 ) -> BatchDetailResponse | None:
     """Fetch batch details with real aggregate status counts."""
-    from sqlalchemy import select
-
-    stmt = select(JobBatch).where(JobBatch.id == batch_id)
-    result = await session.execute(stmt)
-    batch = result.scalar_one_or_none()
-
+    batch = await batch_repository.get_by_id(session, batch_id)
     if batch is None:
         return None
 
-    # Get real status counts
-    rows = await job_repository.count_jobs_by_status_for_batch(session, batch_id)
-    status_counts = [
-        BatchStatusCount(status=status_val, count=count)
-        for status_val, count in rows
-    ]
+    status_counts = await metrics_service.get_batch_status_counts(session, batch_id)
 
     return BatchDetailResponse(
         id=batch.id,

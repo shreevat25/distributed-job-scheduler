@@ -5,7 +5,6 @@ import uuid
 from fastapi import Depends, Header, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import ForbiddenError, NotFoundError
@@ -16,6 +15,13 @@ from app.models.job import Job
 from app.models.project import Project
 from app.models.queue import Queue
 from app.models.user import User
+from app.repositories import (
+    dlq_repository,
+    job_repository,
+    project_repository,
+    queue_repository,
+    user_repository,
+)
 
 bearer_scheme = HTTPBearer()
 
@@ -54,10 +60,7 @@ async def get_current_user(
             detail="Invalid credentials",
         )
 
-    stmt = select(User).where(User.id == user_id, User.is_active == True)  # noqa: E712
-    result = await session.execute(stmt)
-    user = result.scalar_one_or_none()
-
+    user = await user_repository.get_active_by_id(session, user_id)
     if user is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -80,13 +83,7 @@ async def get_owned_project(
     Raises:
         NotFoundError: If project doesn't exist or isn't owned by user.
     """
-    stmt = select(Project).where(
-        Project.id == project_id,
-        Project.owner_id == current_user.id,
-    )
-    result = await session.execute(stmt)
-    project = result.scalar_one_or_none()
-
+    project = await project_repository.get_owned(session, project_id, current_user.id)
     if project is None:
         raise NotFoundError("Project", str(project_id))
 
@@ -105,17 +102,7 @@ async def get_owned_queue(
     Raises:
         NotFoundError: If queue doesn't exist or user doesn't own its project.
     """
-    stmt = (
-        select(Queue)
-        .join(Project, Queue.project_id == Project.id)
-        .where(
-            Queue.id == queue_id,
-            Project.owner_id == current_user.id,
-        )
-    )
-    result = await session.execute(stmt)
-    queue = result.scalar_one_or_none()
-
+    queue = await queue_repository.get_owned(session, queue_id, current_user.id)
     if queue is None:
         raise NotFoundError("Queue", str(queue_id))
 
@@ -127,13 +114,7 @@ async def get_user_queue_ids(
     session: AsyncSession = Depends(get_db),
 ) -> list[uuid.UUID]:
     """Get all queue IDs accessible by the current user (for job listing auth)."""
-    stmt = (
-        select(Queue.id)
-        .join(Project, Queue.project_id == Project.id)
-        .where(Project.owner_id == current_user.id)
-    )
-    result = await session.execute(stmt)
-    return list(result.scalars().all())
+    return await queue_repository.list_ids_for_owner(session, current_user.id)
 
 
 async def get_owned_job(
@@ -142,17 +123,7 @@ async def get_owned_job(
     session: AsyncSession = Depends(get_db),
 ) -> Job:
     """Fetch a job, ensuring it belongs to a project owned by current user."""
-    stmt = (
-        select(Job)
-        .join(Queue, Job.queue_id == Queue.id)
-        .join(Project, Queue.project_id == Project.id)
-        .where(
-            Job.id == job_id,
-            Project.owner_id == current_user.id,
-        )
-    )
-    result = await session.execute(stmt)
-    job = result.scalar_one_or_none()
+    job = await job_repository.get_owned(session, job_id, current_user.id)
     if job is None:
         raise NotFoundError("Job", str(job_id))
     return job
@@ -164,17 +135,7 @@ async def get_owned_dlq_entry(
     session: AsyncSession = Depends(get_db),
 ) -> DLQEntry:
     """Fetch a DLQ entry, ensuring it belongs to a project owned by current user."""
-    stmt = (
-        select(DLQEntry)
-        .join(Queue, DLQEntry.queue_id == Queue.id)
-        .join(Project, Queue.project_id == Project.id)
-        .where(
-            DLQEntry.id == id,
-            Project.owner_id == current_user.id,
-        )
-    )
-    result = await session.execute(stmt)
-    entry = result.scalar_one_or_none()
+    entry = await dlq_repository.get_owned(session, id, current_user.id)
     if entry is None:
         raise NotFoundError("DLQEntry", str(id))
     return entry

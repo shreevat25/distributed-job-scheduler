@@ -10,7 +10,7 @@ from app.models.project import Project
 from app.models.queue import Queue
 from app.models.user import User
 from app.models.worker import Worker
-from app.worker.reaper import reap_expired_jobs
+from app.services.recovery_service import reap_expired_jobs
 
 
 @pytest.mark.asyncio
