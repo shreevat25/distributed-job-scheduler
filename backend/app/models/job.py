@@ -36,6 +36,12 @@ class Job(Base, TimestampMixin):
         ),
         # Worker active job lookup
         Index("ix_jobs_worker_id_status", "worker_id", "status"),
+        # Promotion scan: scheduled/retry_wait jobs that have become due
+        Index(
+            "ix_jobs_due_for_promotion",
+            "available_at",
+            postgresql_where=text("status IN ('scheduled', 'retry_wait')"),
+        ),
         # Lease expiry scan
         Index("ix_jobs_status_lease_expires_at", "status", "lease_expires_at"),
         # Queue timeline

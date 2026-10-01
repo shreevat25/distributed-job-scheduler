@@ -3,7 +3,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import String, Integer, Float, Enum, TIMESTAMP, text
+from sqlalchemy import String, Integer, Float, Enum, Index, TIMESTAMP, text
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -16,6 +16,8 @@ class Worker(Base):
 
     __tablename__ = "workers"
     __table_args__ = (
+        # Reaper stale-worker scan: status = 'online' AND last_seen_at < threshold
+        Index("ix_workers_status_last_seen_at", "status", "last_seen_at"),
         {"comment": "Registered worker processes for job execution"},
     )
 
