@@ -32,11 +32,25 @@ This launches:
 
 Access the dashboard at `http://localhost:8080`.
 
+## Development
+
+Common tasks are wrapped in the root `Makefile` (`make help` lists all of them):
+
+```bash
+make install        # create backend/.venv and install backend + dev deps
+make test-db        # start a disposable PostgreSQL 16 on :54321 for tests
+make test           # run the full test suite
+make migrate        # apply Alembic migrations (uses DATABASE_URL)
+make migrate-check  # fail if models have drifted from migrations
+make run-api        # or run-worker / run-scheduler / run-reaper
+make up             # docker compose up --build -d
+```
+
 ## Testing
-- Verified by **99 passing automated tests** against a real PostgreSQL 16 instance.
+- Verified by **112 passing automated tests** against a real PostgreSQL 16 instance, including a migration round-trip and model-drift check.
 
 ## Documentation
-- [Architecture](docs/ARCHITECTURE.md)
+- [Architecture](docs/ARCHITECTURE.md) (includes the backend code layout)
 - [Database Design](docs/DATABASE_DESIGN.md)
 - [Design Decisions](docs/DESIGN_DECISIONS.md)
 
