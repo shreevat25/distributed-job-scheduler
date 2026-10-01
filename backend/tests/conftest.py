@@ -24,6 +24,7 @@ os.environ.setdefault("ACCESS_TOKEN_EXPIRE_MINUTES", "30")
 
 from app.core.enums import WorkerStatus
 from app.core.security import create_access_token, hash_password
+import app.models  # noqa: F401  (register all models on Base.metadata)
 from app.db.base import Base
 from app.db.session import get_db_session
 from app.main import app
