@@ -3,13 +3,12 @@
 import uuid
 
 from fastapi import APIRouter, Depends
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_db
 from app.core.exceptions import NotFoundError
 from app.models.user import User
-from app.models.worker import Worker
+from app.repositories import worker_repository
 from app.schemas.worker import WorkerResponse
 
 router = APIRouter(tags=["workers"])
@@ -25,9 +24,7 @@ async def list_workers(
     session: AsyncSession = Depends(get_db),
 ) -> list[WorkerResponse]:
     """List all registered worker processes."""
-    stmt = select(Worker).order_by(Worker.started_at.desc())
-    result = await session.execute(stmt)
-    workers = result.scalars().all()
+    workers = await worker_repository.list_all(session)
     return [WorkerResponse.model_validate(w) for w in workers]
 
 
@@ -42,9 +39,7 @@ async def get_worker(
     session: AsyncSession = Depends(get_db),
 ) -> WorkerResponse:
     """Get details of a specific worker process."""
-    stmt = select(Worker).where(Worker.id == id)
-    result = await session.execute(stmt)
-    worker = result.scalar_one_or_none()
+    worker = await worker_repository.get_by_id(session, id)
     if not worker:
         raise NotFoundError("Worker", str(id))
     return WorkerResponse.model_validate(worker)

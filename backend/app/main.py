@@ -19,9 +19,6 @@ from app.core.logging import (
 )
 from app.db.session import engine
 
-# Preload database metadata to prevent circular imports
-from app.db.base import Base
-
 # Import routes
 from app.api.routes import auth, projects, retry_policies, queues, jobs, batches, workers, dlq, schedules
 

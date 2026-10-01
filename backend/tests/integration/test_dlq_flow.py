@@ -14,7 +14,7 @@ from app.models.queue import Queue
 from app.models.user import User
 from app.models.worker import Worker
 from app.services import claim_service
-from app.worker import lifecycle
+from app.services import execution_service
 
 
 @pytest.mark.asyncio
@@ -48,13 +48,13 @@ class TestDLQFlow:
             claimed = await claim_service.claim_jobs(session, queue.id, worker_id, 1, 30)
             await session.commit()
             job = claimed[0]
-            await lifecycle.start_execution(session, job.id, worker_id, job.claim_token)
+            await execution_service.start_execution(session, job.id, worker_id, job.claim_token)
             await session.commit()
 
         # Fail job -> attempt 1 == max_attempts 1 -> DEAD_LETTERED
         async with (await independent_session_factory()) as session:
             exc = RuntimeError("Fatal error")
-            failed_job = await lifecycle.fail_job(session, job_id, worker_id, job.claim_token, exc)
+            failed_job = await execution_service.fail_job(session, job_id, worker_id, job.claim_token, exc)
             await session.commit()
             assert failed_job.status == JobStatus.DEAD_LETTERED
 

@@ -8,7 +8,8 @@ from alembic import context
 from sqlalchemy import pool
 from sqlalchemy.ext.asyncio import create_async_engine
 
-# Import Base with all models registered
+# Import Base and register every model on its metadata
+import app.models  # noqa: F401
 from app.db.base import Base
 
 # Alembic Config object

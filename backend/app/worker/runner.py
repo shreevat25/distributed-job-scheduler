@@ -1,21 +1,20 @@
-"""Distributed worker execution engine and lifecycle runner."""
+"""Distributed worker engine: the poll/claim loop that ties the worker modules together."""
 
 import asyncio
 import logging
-import os
-import signal
-import socket
 import uuid
-from typing import Any, Optional
+from typing import Optional
 
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.config import settings
 from app.core.enums import WorkerStatus
-from app.models.queue import Queue
+from app.repositories import queue_repository
 from app.services import claim_service
-from app.worker import handlers, heartbeat, lifecycle
+from app.worker import heartbeat
+from app.worker.executor import JobExecutor
+from app.worker.heartbeat import HeartbeatEmitter
+from app.worker.shutdown import ShutdownCoordinator, drain_tasks, install_signal_handlers
 
 logger = logging.getLogger(__name__)
 
@@ -37,17 +36,26 @@ class WorkerRunner:
 
         self.semaphore = asyncio.Semaphore(self.concurrency)
         self.active_tasks: set[asyncio.Task] = set()
-        self.lease_renew_tasks: dict[uuid.UUID, asyncio.Task] = {}
 
         self.is_running = False
-        self.is_draining = False
-        self._heartbeat_task: Optional[asyncio.Task] = None
-        self._shutdown_event = asyncio.Event()
+        self.executor = JobExecutor(session_factory, self.worker_id)
+        self.heartbeat = HeartbeatEmitter(
+            session_factory=session_factory,
+            worker_id=self.worker_id,
+            active_job_count=lambda: len(self.active_tasks),
+            interval_seconds=float(settings.WORKER_HEARTBEAT_INTERVAL_SECONDS),
+        )
+        self._shutdown = ShutdownCoordinator()
+
+    @property
+    def is_draining(self) -> bool:
+        """True once graceful shutdown has begun."""
+        return self._shutdown.is_draining
 
     async def run(self) -> None:
         """Start worker registration, heartbeat loop, and job claim loop."""
         self.is_running = True
-        self.is_draining = False
+        self._shutdown.reset()
 
         # 1. Register worker online
         async with self.session_factory() as session:
@@ -59,62 +67,49 @@ class WorkerRunner:
             )
 
         # 2. Start heartbeat loop
-        self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+        self.heartbeat.start()
 
         # 3. Setup signal handlers if running in main thread
-        self._setup_signal_handlers()
+        install_signal_handlers(lambda: asyncio.create_task(self.shutdown()))
 
         logger.info("Worker %s (%s) started polling loop.", self.name, self.worker_id)
 
+        poll_interval = settings.WORKER_POLL_INTERVAL_MS / 1000.0
         try:
-            while self.is_running and not self.is_draining:
+            while self.is_running and not self._shutdown.should_stop:
                 available_slots = self.concurrency - len(self.active_tasks)
-                if available_slots <= 0:
-                    await asyncio.sleep(settings.WORKER_POLL_INTERVAL_MS / 1000.0)
-                    continue
+                if available_slots > 0 and not self._shutdown.is_draining:
+                    try:
+                        await self._poll_and_claim()
+                    except Exception as exc:
+                        logger.error("Error during poll and claim loop: %s", exc, exc_info=True)
 
-                try:
-                    await self._poll_and_claim(available_slots)
-                except Exception as exc:
-                    logger.error("Error during poll and claim loop: %s", exc, exc_info=True)
-
-                await asyncio.sleep(settings.WORKER_POLL_INTERVAL_MS / 1000.0)
+                # Interruptible: returns as soon as shutdown is signalled.
+                await self._shutdown.wait(poll_interval)
         finally:
             await self._shutdown_cleanup()
 
     async def shutdown(self) -> None:
-        """Trigger graceful shutdown."""
-        if not self.is_running or self.is_draining:
+        """Trigger graceful shutdown: stop claiming, record DRAINING, then wake the loop."""
+        if not self.is_running or not self._shutdown.begin_draining():
             return
 
         logger.info("Worker %s received shutdown signal. Entering draining state...", self.name)
-        self.is_draining = True
-        self._shutdown_event.set()
-
         try:
             async with self.session_factory() as session:
                 await heartbeat.update_worker_status(session, self.worker_id, WorkerStatus.DRAINING)
         except Exception as exc:
             logger.warning("Failed to update worker status to draining: %s", exc)
+        finally:
+            self._shutdown.signal_stop()
 
-    def _setup_signal_handlers(self) -> None:
-        """Register SIGTERM and SIGINT signal handlers."""
-        loop = asyncio.get_running_loop()
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            try:
-                loop.add_signal_handler(sig, lambda: asyncio.create_task(self.shutdown()))
-            except (NotImplementedError, RuntimeError):
-                # Windows or not main thread
-                pass
-
-    async def _poll_and_claim(self, available_slots: int) -> None:
-        """Query unpaused queues and claim up to available_slots jobs."""
+    async def _poll_and_claim(self) -> None:
+        """Query unpaused queues and claim jobs up to this worker's free slots."""
         async with self.session_factory() as session:
-            stmt = select(Queue.id).where(Queue.is_paused == False)
-            queue_ids = (await session.execute(stmt)).scalars().all()
+            queue_ids = await queue_repository.list_unpaused_ids(session)
 
         for q_id in queue_ids:
-            if len(self.active_tasks) >= self.concurrency:
+            if self._shutdown.is_draining:
                 break
             slots_left = self.concurrency - len(self.active_tasks)
             if slots_left <= 0:
@@ -140,7 +135,7 @@ class WorkerRunner:
                     continue
                 await self.semaphore.acquire()
                 task = asyncio.create_task(
-                    self._execute_job(
+                    self.executor.execute(
                         job_id=job.id,
                         job_type=job.type,
                         payload=job.payload,
@@ -148,141 +143,21 @@ class WorkerRunner:
                     )
                 )
                 self.active_tasks.add(task)
-                task.add_done_callback(lambda t: self._on_task_done(t))
+                task.add_done_callback(self._on_task_done)
 
     def _on_task_done(self, task: asyncio.Task) -> None:
         """Callback when an execution task completes."""
         self.active_tasks.discard(task)
         self.semaphore.release()
 
-    async def _execute_job(
-        self,
-        job_id: uuid.UUID,
-        job_type: str,
-        payload: dict[str, Any],
-        claim_token: uuid.UUID,
-    ) -> None:
-        """Execute a claimed job in its own independent database session."""
-        # 1. Start execution transactionally
-        async with self.session_factory() as session:
-            try:
-                job, execution = await lifecycle.start_execution(
-                    session=session,
-                    job_id=job_id,
-                    worker_id=self.worker_id,
-                    claim_token=claim_token,
-                )
-                await session.commit()
-                attempt_number = job.attempt_count
-            except Exception as exc:
-                logger.warning("Failed to start execution for job %s: %s", job_id, exc)
-                await session.rollback()
-                return
-
-        # 2. Start background lease renewal task
-        renew_task = asyncio.create_task(self._lease_renew_loop(job_id, claim_token))
-        self.lease_renew_tasks[job_id] = renew_task
-
-        # 3. Run handler
-        try:
-            result = await handlers.execute_job_handler(job_type, payload, attempt_number)
-            # Authoritatively complete
-            async with self.session_factory() as session:
-                await lifecycle.complete_job(
-                    session=session,
-                    job_id=job_id,
-                    worker_id=self.worker_id,
-                    claim_token=claim_token,
-                    result=result,
-                )
-                await session.commit()
-        except Exception as exc:
-            logger.warning("Job %s handler failed on attempt %d: %s", job_id, attempt_number, exc)
-            # Transactional fail (retry or DLQ)
-            async with self.session_factory() as session:
-                try:
-                    await lifecycle.fail_job(
-                        session=session,
-                        job_id=job_id,
-                        worker_id=self.worker_id,
-                        claim_token=claim_token,
-                        exc=exc,
-                    )
-                    await session.commit()
-                except Exception as fail_exc:
-                    logger.error("Error failing job %s: %s", job_id, fail_exc)
-                    await session.rollback()
-        finally:
-            renew_task.cancel()
-            self.lease_renew_tasks.pop(job_id, None)
-            await asyncio.gather(renew_task, return_exceptions=True)
-
-    async def _lease_renew_loop(self, job_id: uuid.UUID, claim_token: uuid.UUID) -> None:
-        """Periodically renew lease for an active job."""
-        interval = float(settings.JOB_LEASE_RENEW_INTERVAL_SECONDS)
-        while True:
-            await asyncio.sleep(interval)
-            async with self.session_factory() as session:
-                try:
-                    renewed = await lifecycle.renew_lease(
-                        session=session,
-                        job_id=job_id,
-                        worker_id=self.worker_id,
-                        claim_token=claim_token,
-                        lease_duration_seconds=settings.JOB_LEASE_DURATION_SECONDS,
-                    )
-                    if not renewed:
-                        logger.warning("Lease renewal failed for job %s (ownership lost). Stopping renewal.", job_id)
-                        break
-                except Exception as exc:
-                    logger.warning("Transient error renewing lease for job %s: %s", job_id, exc)
-                    await session.rollback()
-
-    async def _heartbeat_loop(self) -> None:
-        """Periodically record worker heartbeat."""
-        interval = float(settings.WORKER_HEARTBEAT_INTERVAL_SECONDS)
-        while self.is_running:
-            await asyncio.sleep(interval)
-            async with self.session_factory() as session:
-                try:
-                    await heartbeat.record_heartbeat(
-                        session=session,
-                        worker_id=self.worker_id,
-                        active_job_count=len(self.active_tasks),
-                    )
-                except Exception:
-                    # Logged inside record_heartbeat
-                    pass
-
     async def _shutdown_cleanup(self) -> None:
-        """Perform graceful shutdown draining and offline marking."""
+        """Drain in-flight jobs, stop background loops, and mark the worker offline."""
         logger.info("Starting shutdown cleanup for worker %s...", self.name)
-        if self.active_tasks:
-            logger.info(
-                "Waiting up to %ds for %d active tasks to complete...",
-                settings.WORKER_SHUTDOWN_GRACE_SECONDS,
-                len(self.active_tasks),
-            )
-            done, pending = await asyncio.wait(
-                self.active_tasks,
-                timeout=float(settings.WORKER_SHUTDOWN_GRACE_SECONDS),
-            )
-            if pending:
-                logger.warning("Grace period expired. Cancelling %d unfinished tasks...", len(pending))
-                for task in pending:
-                    task.cancel()
-                await asyncio.gather(*pending, return_exceptions=True)
+        await drain_tasks(self.active_tasks, float(settings.WORKER_SHUTDOWN_GRACE_SECONDS))
 
         self.is_running = False
-        if self._heartbeat_task and not self._heartbeat_task.done():
-            self._heartbeat_task.cancel()
-            await asyncio.gather(self._heartbeat_task, return_exceptions=True)
-
-        for r_task in self.lease_renew_tasks.values():
-            if not r_task.done():
-                r_task.cancel()
-        if self.lease_renew_tasks:
-            await asyncio.gather(*self.lease_renew_tasks.values(), return_exceptions=True)
+        await self.heartbeat.stop()
+        await self.executor.cancel_lease_renewals()
 
         try:
             async with self.session_factory() as session:

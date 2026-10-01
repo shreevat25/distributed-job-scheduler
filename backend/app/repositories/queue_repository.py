@@ -5,10 +5,10 @@ import uuid
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.enums import JobStatus
 from app.models.job import Job
+from app.models.project import Project
 from app.models.queue import Queue
-from app.schemas.queue import QueueStatsResponse
+from app.repositories.job_repository import ACTIVE_STATUSES
 
 
 async def get_queue_for_update(
@@ -71,42 +71,64 @@ async def count_active_jobs(
         .select_from(Job)
         .where(
             Job.queue_id == queue_id,
-            Job.status.in_([JobStatus.CLAIMED, JobStatus.RUNNING]),
+            Job.status.in_(ACTIVE_STATUSES),
         )
     )
     result = await session.execute(stmt)
     return result.scalar_one()
 
 
-async def get_queue_stats(
+async def get_owned(
     session: AsyncSession,
     queue_id: uuid.UUID,
-) -> QueueStatsResponse:
-    """Compute real database counts of jobs by status for a queue."""
+    owner_id: uuid.UUID,
+) -> Queue | None:
+    """Fetch a queue whose project is owned by the given user."""
     stmt = (
-        select(Job.status, func.count().label("count"))
-        .where(Job.queue_id == queue_id)
-        .group_by(Job.status)
+        select(Queue)
+        .join(Project, Queue.project_id == Project.id)
+        .where(
+            Queue.id == queue_id,
+            Project.owner_id == owner_id,
+        )
     )
     result = await session.execute(stmt)
-    rows = result.all()
+    return result.scalar_one_or_none()
 
-    counts: dict[str, int] = {}
-    total = 0
-    for status_val, count in rows:
-        status_name = status_val.value if hasattr(status_val, "value") else str(status_val)
-        counts[status_name] = count
-        total += count
 
-    return QueueStatsResponse(
-        queue_id=queue_id,
-        queued=counts.get("queued", 0),
-        scheduled=counts.get("scheduled", 0),
-        claimed=counts.get("claimed", 0),
-        running=counts.get("running", 0),
-        retry_wait=counts.get("retry_wait", 0),
-        completed=counts.get("completed", 0),
-        failed=counts.get("failed", 0),
-        dead_lettered=counts.get("dead_lettered", 0),
-        total=total,
+async def list_ids_for_owner(
+    session: AsyncSession,
+    owner_id: uuid.UUID,
+) -> list[uuid.UUID]:
+    """List IDs of every queue in projects owned by the given user."""
+    stmt = (
+        select(Queue.id)
+        .join(Project, Queue.project_id == Project.id)
+        .where(Project.owner_id == owner_id)
     )
+    result = await session.execute(stmt)
+    return list(result.scalars().all())
+
+
+async def list_unpaused_ids(session: AsyncSession) -> list[uuid.UUID]:
+    """List IDs of all queues that are not paused."""
+    stmt = select(Queue.id).where(Queue.is_paused == False)  # noqa: E712
+    result = await session.execute(stmt)
+    return list(result.scalars().all())
+
+
+async def find_by_name(
+    session: AsyncSession,
+    project_id: uuid.UUID,
+    name: str,
+    exclude_id: uuid.UUID | None = None,
+) -> Queue | None:
+    """Find a project's queue by name, optionally excluding one queue."""
+    stmt = select(Queue).where(
+        Queue.project_id == project_id,
+        Queue.name == name,
+    )
+    if exclude_id is not None:
+        stmt = stmt.where(Queue.id != exclude_id)
+    result = await session.execute(stmt)
+    return result.scalar_one_or_none()

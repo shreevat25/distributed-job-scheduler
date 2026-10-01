@@ -8,7 +8,7 @@ from app.models.job import Job
 from app.models.project import Project
 from app.models.queue import Queue
 from app.models.user import User
-from app.worker.scheduler import promote_due_jobs
+from app.services.schedule_service import promote_due_jobs
 
 
 @pytest.mark.asyncio

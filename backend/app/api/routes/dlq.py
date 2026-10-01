@@ -2,20 +2,15 @@
 
 import uuid
 
-from fastapi import APIRouter, Depends, Query, status
-from sqlalchemy import select, text
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_db, get_owned_dlq_entry
-from app.core.enums import JobStatus, LogLevel
-from app.core.exceptions import ConflictError, NotFoundError
 from app.models.dlq_entry import DLQEntry
-from app.models.job import Job
-from app.models.job_log import JobLog
-from app.models.project import Project
-from app.models.queue import Queue
 from app.models.user import User
+from app.repositories import dlq_repository
 from app.schemas.dlq import DLQEntryResponse
+from app.services import retry_service
 
 router = APIRouter(tags=["dlq"])
 
@@ -31,17 +26,7 @@ async def list_dlq_entries(
     session: AsyncSession = Depends(get_db),
 ) -> list[DLQEntryResponse]:
     """List dead-letter queue entries for projects owned by the current user."""
-    stmt = (
-        select(DLQEntry)
-        .join(Queue, DLQEntry.queue_id == Queue.id)
-        .join(Project, Queue.project_id == Project.id)
-        .where(Project.owner_id == current_user.id)
-    )
-    if queue_id:
-        stmt = stmt.where(DLQEntry.queue_id == queue_id)
-    stmt = stmt.order_by(DLQEntry.dead_lettered_at.desc())
-    result = await session.execute(stmt)
-    entries = result.scalars().all()
+    entries = await dlq_repository.list_for_owner(session, current_user.id, queue_id)
     return [DLQEntryResponse.model_validate(e) for e in entries]
 
 
@@ -74,50 +59,7 @@ async def retry_dlq_job(
     - Requeues job
     - Marks DLQ entry retried_at and retried_by
     """
-    stmt = (
-        select(DLQEntry)
-        .join(Queue, DLQEntry.queue_id == Queue.id)
-        .join(Project, Queue.project_id == Project.id)
-        .where(
-            DLQEntry.id == id,
-            Project.owner_id == current_user.id,
-        )
-        .with_for_update()
-    )
-    dlq_entry = (await session.execute(stmt)).scalar_one_or_none()
-    if not dlq_entry:
-        raise NotFoundError("DLQEntry", str(id))
-
-    if dlq_entry.retried_at is not None:
-        raise ConflictError("DLQ entry has already been retried")
-
-    job_stmt = select(Job).where(Job.id == dlq_entry.job_id).with_for_update()
-    job = (await session.execute(job_stmt)).scalar_one_or_none()
-    if not job:
-        raise NotFoundError("Job", str(dlq_entry.job_id))
-
-    # Reset job attempt_count to 0 and requeue
-    job.attempt_count = 0
-    job.status = JobStatus.QUEUED
-    job.available_at = text("NOW()")
-    job.failed_at = None
-    job.worker_id = None
-    job.claim_token = None
-    job.claimed_at = None
-    job.lease_expires_at = None
-
-    # Mark DLQ entry
-    dlq_entry.retried_at = text("NOW()")
-    dlq_entry.retried_by = current_user.id
-
-    # Append job log
-    log = JobLog(
-        job_id=job.id,
-        level=LogLevel.INFO,
-        message=f"Job manually retried from DLQ by user {current_user.id} (attempt count reset to 0)",
-    )
-    session.add(log)
-
+    dlq_entry = await retry_service.retry_dead_lettered_job(session, id, current_user.id)
     await session.commit()
     await session.refresh(dlq_entry)
     return DLQEntryResponse.model_validate(dlq_entry)

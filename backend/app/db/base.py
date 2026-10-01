@@ -38,19 +38,3 @@ class TimestampMixin:
         server_default=text("NOW()"),
         onupdate=lambda: datetime.now(UTC),
     )
-
-
-# Import all models so that Base.metadata knows about them.
-# This is critical for Alembic autogenerate to discover all tables.
-from app.models.user import User  # noqa: E402, F401
-from app.models.project import Project  # noqa: E402, F401
-from app.models.retry_policy import RetryPolicy  # noqa: E402, F401
-from app.models.queue import Queue  # noqa: E402, F401
-from app.models.job_batch import JobBatch  # noqa: E402, F401
-from app.models.worker import Worker  # noqa: E402, F401
-from app.models.job import Job  # noqa: E402, F401
-from app.models.job_execution import JobExecution  # noqa: E402, F401
-from app.models.job_log import JobLog  # noqa: E402, F401
-from app.models.scheduled_job import ScheduledJob  # noqa: E402, F401
-from app.models.worker_heartbeat import WorkerHeartbeat  # noqa: E402, F401
-from app.models.dlq_entry import DLQEntry  # noqa: E402, F401

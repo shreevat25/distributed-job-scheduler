@@ -2,12 +2,12 @@
 
 import uuid
 
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import AuthenticationError, ConflictError
 from app.core.security import create_access_token, hash_password, verify_password
 from app.models.user import User
+from app.repositories import user_repository
 from app.schemas.auth import RegisterRequest, LoginRequest, TokenResponse, UserResponse
 
 
@@ -22,19 +22,16 @@ async def register_user(
     """
     normalized_email = User.normalize_email(data.email)
 
-    # Check for existing user
-    stmt = select(User).where(User.email == normalized_email)
-    result = await session.execute(stmt)
-    existing = result.scalar_one_or_none()
-    if existing is not None:
+    if await user_repository.get_by_email(session, normalized_email) is not None:
         raise ConflictError("Email already registered")
 
-    user = User(
-        email=normalized_email,
-        password_hash=hash_password(data.password),
+    user = await user_repository.create(
+        session,
+        User(
+            email=normalized_email,
+            password_hash=hash_password(data.password),
+        ),
     )
-    session.add(user)
-    await session.flush()
 
     return UserResponse.model_validate(user)
 
@@ -50,9 +47,7 @@ async def authenticate_user(
     """
     normalized_email = User.normalize_email(data.email)
 
-    stmt = select(User).where(User.email == normalized_email)
-    result = await session.execute(stmt)
-    user = result.scalar_one_or_none()
+    user = await user_repository.get_by_email(session, normalized_email)
 
     if user is None or not verify_password(data.password, user.password_hash):
         raise AuthenticationError()
@@ -69,6 +64,4 @@ async def get_user_by_id(
     user_id: uuid.UUID,
 ) -> User | None:
     """Fetch a user by ID."""
-    stmt = select(User).where(User.id == user_id)
-    result = await session.execute(stmt)
-    return result.scalar_one_or_none()
+    return await user_repository.get_by_id(session, user_id)

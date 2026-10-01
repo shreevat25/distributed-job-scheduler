@@ -9,7 +9,7 @@ from app.models.project import Project
 from app.models.queue import Queue
 from app.models.scheduled_job import ScheduledJob
 from app.models.user import User
-from app.worker.scheduler import materialize_due_schedules
+from app.services.schedule_service import materialize_due_schedules
 
 @pytest.mark.asyncio
 class TestCronExtra:

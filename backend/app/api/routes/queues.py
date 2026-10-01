@@ -4,7 +4,6 @@ import uuid
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, status
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_db, get_owned_project, get_owned_queue
@@ -14,6 +13,7 @@ from app.models.queue import Queue
 from app.models.user import User
 from app.repositories import queue_repository
 from app.schemas.queue import QueueCreate, QueueResponse, QueueStatsResponse, QueueUpdate
+from app.services import metrics_service
 
 router = APIRouter(tags=["queues"])
 
@@ -30,25 +30,20 @@ async def create_queue(
     session: AsyncSession = Depends(get_db),
 ) -> QueueResponse:
     """Create a queue within a project."""
-    # Check for duplicate name within project
-    stmt = select(Queue).where(
-        Queue.project_id == project.id,
-        Queue.name == data.name,
-    )
-    result = await session.execute(stmt)
-    if result.scalar_one_or_none() is not None:
+    if await queue_repository.find_by_name(session, project.id, data.name) is not None:
         raise ConflictError(f"Queue '{data.name}' already exists in this project")
 
-    queue = Queue(
-        project_id=project.id,
-        retry_policy_id=data.retry_policy_id,
-        name=data.name,
-        description=data.description,
-        priority=data.priority,
-        concurrency_limit=data.concurrency_limit,
+    queue = await queue_repository.create_queue(
+        session,
+        Queue(
+            project_id=project.id,
+            retry_policy_id=data.retry_policy_id,
+            name=data.name,
+            description=data.description,
+            priority=data.priority,
+            concurrency_limit=data.concurrency_limit,
+        ),
     )
-    session.add(queue)
-    await session.flush()
     return QueueResponse.model_validate(queue)
 
 
@@ -92,13 +87,10 @@ async def update_queue(
     update_data = data.model_dump(exclude_unset=True)
 
     if "name" in update_data and update_data["name"] is not None:
-        dup_stmt = select(Queue).where(
-            Queue.project_id == queue.project_id,
-            Queue.name == update_data["name"],
-            Queue.id != queue.id,
+        duplicate = await queue_repository.find_by_name(
+            session, queue.project_id, update_data["name"], exclude_id=queue.id
         )
-        dup_result = await session.execute(dup_stmt)
-        if dup_result.scalar_one_or_none() is not None:
+        if duplicate is not None:
             raise ConflictError(f"Queue '{update_data['name']}' already exists")
 
     for key, value in update_data.items():
@@ -151,4 +143,4 @@ async def get_queue_stats(
     session: AsyncSession = Depends(get_db),
 ) -> QueueStatsResponse:
     """Get real database-counted statistics for a queue."""
-    return await queue_repository.get_queue_stats(session, queue.id)
+    return await metrics_service.get_queue_stats(session, queue.id)

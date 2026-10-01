@@ -4,16 +4,13 @@ import uuid
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Query, status
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_db, get_owned_job, get_owned_queue, get_user_queue_ids
 from app.core.enums import JobStatus
 from app.models.job import Job
-from app.models.job_execution import JobExecution
-from app.models.job_log import JobLog
 from app.models.queue import Queue
-from app.models.user import User
+from app.repositories import execution_repository, job_log_repository
 from app.schemas.common import PaginatedResponse
 from app.schemas.job import (
     ClaimRequest,
@@ -149,9 +146,7 @@ async def list_job_executions(
     session: AsyncSession = Depends(get_db),
 ) -> list[JobExecutionResponse]:
     """List all execution attempt records for a job."""
-    stmt = select(JobExecution).where(JobExecution.job_id == job.id).order_by(JobExecution.attempt_number.asc())
-    result = await session.execute(stmt)
-    executions = result.scalars().all()
+    executions = await execution_repository.list_for_job(session, job.id)
     return [JobExecutionResponse.model_validate(e) for e in executions]
 
 
@@ -165,8 +160,6 @@ async def list_job_logs(
     session: AsyncSession = Depends(get_db),
 ) -> list[JobLogResponse]:
     """List all structured log records for a job."""
-    stmt = select(JobLog).where(JobLog.job_id == job.id).order_by(JobLog.created_at.asc())
-    result = await session.execute(stmt)
-    logs = result.scalars().all()
+    logs = await job_log_repository.list_for_job(session, job.id)
     return [JobLogResponse.model_validate(log) for log in logs]
 
